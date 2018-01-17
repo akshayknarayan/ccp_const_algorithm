@@ -15,6 +15,7 @@ pub struct CcpExample<T: Ipc> {
     sock_id: u32,
     set: CcpExampleConfigEnum,
     mss: u32,
+    perack: bool,
 }
 
 #[derive(Clone)]
@@ -26,37 +27,31 @@ pub enum CcpExampleConfigEnum {
 #[derive(Clone)]
 pub struct CcpExampleConfig {
     pub set: CcpExampleConfigEnum,
+    pub perack: bool,
 }
 
 impl Default for CcpExampleConfig {
     fn default() -> Self {
         CcpExampleConfig {
-            set: CcpExampleConfigEnum::Rate(125000) // 1 Mbps
+            set: CcpExampleConfigEnum::Rate(125000), // 1 Mbps
+            perack: false,
         }
     }
 }
 
 impl<T: Ipc> CcpExample<T> {
-    fn send_pattern(&self) {
+    fn send_pattern_perack(&self) {
         let pattern = match self.set {
             CcpExampleConfigEnum::Cwnd(c) => {
-                self.logger.as_ref().map(|log| {
-                    info!(log, "set pattern"; "cwnd" => c);
-                });
                 make_pattern!(
                     pattern::Event::SetCwndAbs(c) =>
-                    pattern::Event::WaitNs(1000000000) => 
-                    pattern::Event::Report
+                    pattern::Event::WaitNs(1_000_000_000) 
                 )
             }
             CcpExampleConfigEnum::Rate(r) => {
-                self.logger.as_ref().map(|log| {
-                    info!(log, "set pattern"; "rate" => r);
-                });
                 make_pattern!(
                     pattern::Event::SetRateAbsWithCwnd(r) =>
-                    pattern::Event::WaitNs(1000000000) => 
-                    pattern::Event::Report
+                    pattern::Event::WaitNs(1_000_000_000) 
                 )
             }
         };
@@ -71,6 +66,70 @@ impl<T: Ipc> CcpExample<T> {
         }
     }
 
+    fn install_fold_perack(&self) -> Option<Scope> {
+        match self.control_channel.install_measurement(
+            self.sock_id,
+            "
+                (def (minrtt +infinity) (rtt 0) (then 0) (rin 0) (rout 0))
+                (bind Flow.minrtt (min Flow.minrtt Pkt.rtt_sample_us))
+                (bind Flow.rtt (ewma 3 Pkt.rtt_sample_us))
+
+                (bind inter 0)
+                (bind inter (!if (eq Flow.then 0) (- Pkt.now Flow.then)))
+
+                (bind Flow.rin (if (> inter 0) prev_rin))
+                (bind Flow.rout (if (> inter 0) prev_rout))
+                (bind prev_rin Pkt.rate_outgoing)
+                (bind prev_rout Pkt.rate_incoming)
+                (bind Flow.then Pkt.now)
+                (bind isUrgent true)
+            "
+                .as_bytes(),
+        ) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                self.logger.as_ref().map(|log| {
+                    warn!(log, "install_measurement"; "err" => ?e);
+                });
+                None
+            }
+        }
+    }
+    
+    fn send_pattern(&self) {
+        let pattern = match self.set {
+            CcpExampleConfigEnum::Cwnd(c) => {
+                self.logger.as_ref().map(|log| {
+                    info!(log, "set pattern"; "cwnd" => c);
+                });
+                make_pattern!(
+                    pattern::Event::SetCwndAbs(c) =>
+                    pattern::Event::WaitRtts(1.0) => 
+                    pattern::Event::Report
+                )
+            }
+            CcpExampleConfigEnum::Rate(r) => {
+                self.logger.as_ref().map(|log| {
+                    info!(log, "set pattern"; "rate" => r);
+                });
+                make_pattern!(
+                    pattern::Event::SetRateAbsWithCwnd(r) =>
+                    pattern::Event::WaitRtts(1.0) => 
+                    pattern::Event::Report
+                )
+            }
+        };
+
+        match self.control_channel.send_pattern(self.sock_id, pattern) {
+            Ok(_) => (),
+            Err(e) => {
+                self.logger.as_ref().map(|log| {
+                    warn!(log, "send_pattern"; "err" => ?e);
+                });
+            }
+        }
+    }
+    
     fn install_fold(&self) -> Option<Scope> {
         match self.control_channel.install_measurement(
             self.sock_id,
@@ -141,27 +200,37 @@ impl<T: Ipc> CongAlg<T> for CcpExample<T> {
             logger: cfg.logger,
             set: cfg.config.set,
             mss: info.mss,
+            perack: cfg.config.perack,
         };
 
         s.logger.as_ref().map(|log| {
             debug!(log, "starting ccp_example_alg flow"; "sock_id" => info.sock_id);
         });
 
-        s.sc = s.install_fold();
-        s.send_pattern();
+        if s.perack {
+            s.sc = s.install_fold_perack();
+            s.send_pattern_perack();
+        } else {
+            s.sc = s.install_fold();
+            s.send_pattern();
+        }
         s
     }
 
     fn measurement(&mut self, _sock_id: u32, m: Measurement) {
-        let (minrtt, rtt, cwnd, rin, rout) = self.get_fields(m);
-        self.logger.as_ref().map(|log| {
-            debug!(log, "measurement"; 
-                "min_rtt (us)" => minrtt,
-                "rtt (us)" => rtt,
-                "cwnd (pkts)" => cwnd / self.mss,
-                "rin (Bps)" => rin,
-                "rout (Bps)" => rout,
-            );
-        });
+        if self.perack {
+            self.send_pattern();
+        } else {
+            let (minrtt, rtt, cwnd, rin, rout) = self.get_fields(m);
+            self.logger.as_ref().map(|log| {
+                debug!(log, "measurement"; 
+                    "min_rtt (us)" => minrtt,
+                    "rtt (us)" => rtt,
+                    "cwnd (pkts)" => cwnd / self.mss,
+                    "rin (Bps)" => rin,
+                    "rout (Bps)" => rout,
+                );
+            });
+        }
     }
 }

@@ -42,6 +42,9 @@ fn make_args() -> Result<(ccp_example_alg::CcpExampleConfig, String), String> {
         .group(clap::ArgGroup::with_name("to_set")
                .args(&["cwnd", "rate"])
                .required(true))
+        .arg(Arg::with_name("report_per_ack")
+             .long("per_ack")
+             .help("Specifies that the datapath should send a measurement upon every ACK"))
         .get_matches();
 
     if matches.is_present("to_set") {
@@ -50,6 +53,7 @@ fn make_args() -> Result<(ccp_example_alg::CcpExampleConfig, String), String> {
             Ok((
                 ccp_example_alg::CcpExampleConfig {
                     set: ccp_example_alg::CcpExampleConfigEnum::Rate(rate),
+                    perack: matches.is_present("report_per_ack"),
                 },
                 String::from(matches.value_of("ipc").unwrap()),
             ))
@@ -58,6 +62,7 @@ fn make_args() -> Result<(ccp_example_alg::CcpExampleConfig, String), String> {
             Ok((
                 ccp_example_alg::CcpExampleConfig {
                     set: ccp_example_alg::CcpExampleConfigEnum::Cwnd(cwnd),
+                    perack: matches.is_present("report_per_ack"),
                 },
                 String::from(matches.value_of("ipc").unwrap()),
             ))
