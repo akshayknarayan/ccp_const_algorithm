@@ -1,0 +1,12 @@
+[package]
+name = "ccp_example_alg"
+version = "0.0.3"
+authors = ["Akshay Narayan <akshayn@mit.edu>"]
+
+[dependencies]
+clap = "2.29"
+portus = { git = "ssh://github.mit.edu/nebula/portus" }
+slog = "2"
+slog-async = "2"
+slog-term = "2"
+time = "0.1"
