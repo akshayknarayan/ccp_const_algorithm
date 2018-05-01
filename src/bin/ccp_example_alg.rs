@@ -11,7 +11,7 @@ extern crate portus;
 
 use clap::Arg;
 use ccp_example_alg::CcpExample;
-use portus::ipc::Backend;
+use portus::ipc::{BackendBuilder, ListenMode};
 
 fn make_logger() -> slog::Logger {
     let decorator = slog_term::TermDecorator::new().build();
@@ -30,7 +30,7 @@ fn make_args() -> Result<(ccp_example_alg::CcpExampleConfig, String), String> {
              .help("Sets the type of ipc to use: (netlink|unix)")
              .takes_value(true)
              .required(true)
-             .validator(portus::ipc_valid))
+             .validator(portus::algs::ipc_valid))
         .arg(Arg::with_name("cwnd")
              .long("cwnd")
              .takes_value(true)
@@ -74,35 +74,6 @@ fn make_args() -> Result<(ccp_example_alg::CcpExampleConfig, String), String> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    let log = make_logger();
-    let (cfg, ipc) = make_args()
-        .map_err(|e| warn!(log, "bad argument"; "err" => ?e))
-        .unwrap_or(Default::default());
-
-    info!(log, "starting CCP Example");
-    info!(log, "rates reported using ACK compression heuristic");
-    match ipc.as_str() {
-        "unix" => {
-            use portus::ipc::unix::Socket;
-            let b = Socket::new(0).and_then(|sk| Backend::new(sk)).expect(
-                "ipc initialization",
-            );
-
-            portus::start::<_, CcpExample<Socket>>(
-                b,
-                portus::Config {
-                    logger: Some(log),
-                    config: cfg,
-                },
-            );
-        }
-        _ => unreachable!(),
-    }
-}
-
-#[cfg(all(target_os = "linux"))]
 fn main() {
     let log = make_logger();
     let (cfg, ipc) = make_args()
@@ -113,31 +84,30 @@ fn main() {
     match ipc.as_str() {
         "unix" => {
             use portus::ipc::unix::Socket;
-            let b = Socket::new(0).and_then(|sk| Backend::new(sk)).expect(
-                "ipc initialization",
-            );
-
-            portus::start::<_, CcpExample<Socket>>(
+            let b = Socket::new("in", "out")
+                .map(|sk| BackendBuilder {sock: sk,  mode: ListenMode::Blocking})
+                .expect("ipc initialization");
+            portus::run::<_, CcpExample<_>>(
                 b,
-                portus::Config {
+                &portus::Config {
                     logger: Some(log),
                     config: cfg,
-                },
-            );
+                }
+                ).unwrap();
         }
+        #[cfg(all(target_os = "linux"))]
         "netlink" => {
             use portus::ipc::netlink::Socket;
-            let b = Socket::new().and_then(|sk| Backend::new(sk)).expect(
-                "ipc initialization",
-            );
-
-            portus::start::<_, CcpExample<Socket>>(
+            let b = Socket::new()
+                .map(|sk| BackendBuilder {sock: sk,  mode: ListenMode::Blocking})
+                .expect("ipc initialization");
+            portus::run::<_, CcpExample<_>>(
                 b,
-                portus::Config {
+                &portus::Config {
                     logger: Some(log),
                     config: cfg,
-                },
-            );
+                }
+                ).unwrap();
         }
         _ => unreachable!(),
     }
