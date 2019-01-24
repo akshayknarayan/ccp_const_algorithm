@@ -1,14 +1,15 @@
+extern crate fnv;
 extern crate portus;
-#[macro_use]
 extern crate slog;
 extern crate time;
 
-use portus::{CongAlg, Config, Datapath, DatapathInfo, DatapathTrait, Report};
+use fnv::FnvHashMap as HashMap;
 use portus::ipc::Ipc;
 use portus::lang::Scope;
+use portus::{CongAlg, Datapath, DatapathInfo, DatapathTrait, Report};
+use slog::{debug, info};
 
-pub struct CcpExample<T: Ipc> {
-    control_channel: Datapath<T>,
+pub struct CcpExample {
     logger: Option<slog::Logger>,
     sc: Scope,
     set: CcpExampleConfigEnum,
@@ -24,22 +25,23 @@ pub enum CcpExampleConfigEnum {
 
 #[derive(Clone)]
 pub struct CcpExampleConfig {
+    pub logger: Option<slog::Logger>,
     pub set: CcpExampleConfigEnum,
     pub perack: bool,
 }
 
-impl Default for CcpExampleConfig {
-    fn default() -> Self {
-        CcpExampleConfig {
-            set: CcpExampleConfigEnum::Rate(125000), // 1 Mbps
-            perack: false,
-        }
-    }
-}
+impl<I: Ipc> CongAlg<I> for CcpExampleConfig {
+    type Flow = CcpExample;
 
-impl<T: Ipc> CcpExample<T> {
-    fn install_perack(&self) -> Scope {
-        self.control_channel.install(b"
+    fn name() -> &'static str {
+        "flat_rate_cwnd"
+    }
+
+    fn datapath_programs(&self) -> HashMap<&'static str, String> {
+        let mut h = HashMap::default();
+        h.insert(
+            "perack",
+            "
             (def
                 (Report.minrtt +infinity)
                 (Report.rtt 0)
@@ -55,21 +57,18 @@ impl<T: Ipc> CcpExample<T> {
                 (:= Report.rout Flow.rate_incoming)
                 (report)
             )"
-        ).unwrap()
-    }
-    
-    fn install_interval(&self, interval: time::Duration) -> Scope {
-        self.logger.as_ref().map(|log| {
-            debug!(log, "installing program"; "interval (us)" => interval.num_microseconds().unwrap());
-        });
-
-        self.control_channel.install(format!("
+            .to_owned(),
+        );
+        h.insert(
+            "interval",
+            "
             (def
                 (Report.minrtt +infinity)
                 (Report.rtt 0)
                 (Report.cwnd 0)
                 (Report.rin 0)
                 (Report.rout 0)
+                (interval 100000)
             )
             (when true
                 (:= Report.rtt Flow.rtt_sample_us)
@@ -79,78 +78,91 @@ impl<T: Ipc> CcpExample<T> {
                 (:= Report.rout Flow.rate_incoming)
                 (fallthrough)
             )
-            (when (> Micros {})
+            (when (> Micros interval)
                 (report)
                 (reset)
-            )", interval.num_microseconds().unwrap()).as_bytes()
-        ).unwrap()
+            )"
+            .to_owned(),
+        );
+
+        h
     }
 
+    fn new_flow(&self, mut control: Datapath<I>, info: DatapathInfo) -> Self::Flow {
+        let mut s = CcpExample {
+            logger: self.logger.clone(),
+            sc: Default::default(),
+            set: self.set.clone(),
+            mss: info.mss,
+            perack: self.perack,
+        };
+
+        s.logger.as_ref().map(|log| {
+            info!(log, "starting ccp_example_alg flow"; "sock_id" => info.sock_id);
+        });
+
+        s.sc = if s.perack {
+            self.logger.as_ref().map(|log| {
+                debug!(log, "installing perack program");
+            });
+
+            control.set_program("perack", None).unwrap()
+        } else {
+            let interval = time::Duration::milliseconds(100);
+            self.logger.as_ref().map(|log| {
+                debug!(log, "installing program"; "interval (us)" => interval.num_microseconds().unwrap());
+            });
+
+            control
+                .set_program(
+                    "interval",
+                    Some(&[("interval", interval.num_microseconds().unwrap() as u32)]),
+                )
+                .unwrap()
+        };
+
+        match s.set {
+            CcpExampleConfigEnum::Cwnd(c) => control.update_field(&s.sc, &[("Cwnd", c)]),
+            CcpExampleConfigEnum::Rate(r) => control.update_field(&s.sc, &[("Rate", r)]),
+        }
+        .unwrap();
+
+        s
+    }
+}
+
+impl CcpExample {
     fn get_fields(&mut self, m: Report) -> (u32, u32, u32, u32, u32) {
         let sc = &self.sc;
-        let minrtt = m.get_field("Report.minrtt", sc).expect(
-            "expected minrtt field in returned measurement",
-        ) as u32;
+        let minrtt = m
+            .get_field("Report.minrtt", sc)
+            .expect("expected minrtt field in returned measurement") as u32;
 
-        let rtt = m.get_field("Report.rtt", sc).expect(
-            "expected rtt field in returned measurement",
-        ) as u32;
+        let rtt = m
+            .get_field("Report.rtt", sc)
+            .expect("expected rtt field in returned measurement") as u32;
 
-        let cwnd = m.get_field("Report.cwnd", sc).expect(
-            "expected cwnd field in returned measurement",
-        ) as u32;
+        let cwnd = m
+            .get_field("Report.cwnd", sc)
+            .expect("expected cwnd field in returned measurement") as u32;
 
-        let rin = m.get_field("Report.rin", sc).expect(
-            "expected rin field in returned measurement",
-        ) as u32;
+        let rin = m
+            .get_field("Report.rin", sc)
+            .expect("expected rin field in returned measurement") as u32;
 
-        let rout = m.get_field("Report.rout", sc).expect(
-            "expected rout field in returned measurement",
-        ) as u32;
+        let rout = m
+            .get_field("Report.rout", sc)
+            .expect("expected rout field in returned measurement") as u32;
 
         (minrtt, rtt, cwnd, rin, rout)
     }
 }
 
-impl<T: Ipc> CongAlg<T> for CcpExample<T> {
-    type Config = CcpExampleConfig;
-
-    fn name() -> String {
-        String::from("ccp_example")
-    }
-
-    fn create(control: Datapath<T>, cfg: Config<T, CcpExample<T>>, info: DatapathInfo) -> Self {
-        let mut s = Self {
-            control_channel: control,
-            sc: Default::default(),
-            logger: cfg.logger,
-            set: cfg.config.set,
-            mss: info.mss,
-            perack: cfg.config.perack,
-        };
-
-        s.logger.as_ref().map(|log| {
-            debug!(log, "starting ccp_example_alg flow"; "sock_id" => info.sock_id);
-        });
-
-        if s.perack {
-            s.sc = s.install_perack();
-        } else {
-            s.sc = s.install_interval(time::Duration::milliseconds(100));
-        }
-
-        match s.set {
-            CcpExampleConfigEnum::Cwnd(c) => s.control_channel.update_field(&s.sc, &[("Cwnd", c)]),
-            CcpExampleConfigEnum::Rate(r) => s.control_channel.update_field(&s.sc, &[("Rate", r)]),
-        }.unwrap();
-
-        s
-    }
-
+impl portus::Flow for CcpExample {
     fn on_report(&mut self, _sock_id: u32, m: Report) {
         let (minrtt, rtt, cwnd, rin, rout) = self.get_fields(m);
         self.logger.as_ref().map(|log| {
-            debug!(log, "measurement"; 
+            debug!(log, "measurement";
                 "min_rtt (us)" => minrtt,
                 "rtt (us)" => rtt,
                 "cwnd (pkts)" => cwnd / self.mss,

@@ -1,11 +1,13 @@
 [package]
 name = "ccp_example_alg"
-version = "0.0.3"
+version = "0.0.4"
 authors = ["Akshay Narayan <akshayn@mit.edu>"]
+edition = "2018"
 
 [dependencies]
 clap = "2.29"
-portus = { path = "../portus" }
+fnv = "1"
+portus = "0.4.2"
 slog = "2"
 slog-async = "2"
 slog-term = "2"
